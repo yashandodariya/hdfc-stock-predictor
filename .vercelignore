@@ -1,0 +1,11 @@
+# Vercel Ignore Rules
+.venv
+venv
+backend/venv
+frontend/node_modules
+node_modules
+frontend/dist
+**/__pycache__
+**/*.pyc
+.git
+.DS_Store
