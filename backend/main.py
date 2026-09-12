@@ -1,15 +1,14 @@
 import os
+import json
 import logging
-import joblib
-import pandas as pd
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 
-from schemas import PredictRequest, PredictResponse, HealthResponse, AnalyticsResponse, HistoricalRecord, PerformanceResponse, ModelPerformance
-from sklearn.metrics import mean_squared_error, r2_score
+from schemas import (
+    PredictRequest, PredictResponse, HealthResponse,
+    AnalyticsResponse, HistoricalRecord, PerformanceResponse
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,161 +19,99 @@ app = FastAPI(title="HDFC Stock Price Prediction API", version="1.0.0")
 # Enable CORS for React dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify frontend domain e.g., ["http://localhost:5173"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Paths to data & models
+# Paths to data bundle
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
-CSV_PATH = os.path.join(DATA_DIR, "HDFC_Data_New.csv")
+BUNDLE_PATH = os.path.join(DATA_DIR, "models_bundle.json")
 
-# Model paths
-MODEL_LINEAR_PATH = os.path.join(DATA_DIR, "HDFC_model.pkl")
-MODEL_POLY_PATH = os.path.join(DATA_DIR, "polynomial_regression.pkl")
-POLY_FEATURES_PATH = os.path.join(DATA_DIR, "polynomial_features.pkl")
-MODEL_RIDGE_PATH = os.path.join(DATA_DIR, "ridge_regression.pkl")
-MODEL_RF_PATH = os.path.join(DATA_DIR, "random_forest_regression.pkl")
-MODEL_SVR_PATH = os.path.join(DATA_DIR, "svr.pkl")
-
-# Global states
-model = None  # Alias for backward compatibility (Linear Regression)
-model_linear = None
-model_poly = None
-poly_features = None
-model_ridge = None
-model_rf = None
-model_svr = None
-
-scaler = None
-df_historical = None
+# Global loaded state
+bundle_data = None
+scaler_mean = None
+scaler_scale = None
+linear_coef = None
+linear_intercept = None
+poly_coef = None
+poly_intercept = None
+poly_powers = None
+ridge_coef = None
+ridge_intercept = None
+svr_sv = None
+svr_dual_coef = None
+svr_intercept = None
+svr_gamma = None
+rf_trees = None
 performances_cache = []
-
-def calculate_performances(x_test, y_test):
-    global performances_cache
-    try:
-        x_test_scaled = scaler.transform(x_test)
-        
-        # 1. Linear Regression
-        p_linear = model_linear.predict(x_test_scaled)
-        rss_linear = float(np.sum((y_test - p_linear) ** 2))
-        rmse_linear = float(np.sqrt(mean_squared_error(y_test, p_linear)))
-        r2_linear = float(r2_score(y_test, p_linear))
-        
-        # 2. Polynomial Regression
-        p_poly = model_poly.predict(poly_features.transform(x_test_scaled))
-        rss_poly = float(np.sum((y_test - p_poly) ** 2))
-        rmse_poly = float(np.sqrt(mean_squared_error(y_test, p_poly)))
-        r2_poly = float(r2_score(y_test, p_poly))
-        
-        # 3. Ridge Regression
-        p_ridge = model_ridge.predict(x_test_scaled)
-        rss_ridge = float(np.sum((y_test - p_ridge) ** 2))
-        rmse_ridge = float(np.sqrt(mean_squared_error(y_test, p_ridge)))
-        r2_ridge = float(r2_score(y_test, p_ridge))
-        
-        # 4. Random Forest Regression
-        p_rf = model_rf.predict(x_test_scaled)
-        rss_rf = float(np.sum((y_test - p_rf) ** 2))
-        rmse_rf = float(np.sqrt(mean_squared_error(y_test, p_rf)))
-        r2_rf = float(r2_score(y_test, p_rf))
-        
-        # 5. Support Vector Regression (SVR)
-        p_svr = model_svr.predict(x_test_scaled)
-        rss_svr = float(np.sum((y_test - p_svr) ** 2))
-        rmse_svr = float(np.sqrt(mean_squared_error(y_test, p_svr)))
-        r2_svr = float(r2_score(y_test, p_svr))
-        
-        performances_cache = [
-            {"model": "Polynomial Regression", "rss": round(rss_poly, 2), "rmse": round(rmse_poly, 4), "r2": round(r2_poly, 6)},
-            {"model": "Ridge Regression", "rss": round(rss_ridge, 2), "rmse": round(rmse_ridge, 4), "r2": round(r2_ridge, 6)},
-            {"model": "Random Forest Regression", "rss": round(rss_rf, 2), "rmse": round(rmse_rf, 4), "r2": round(r2_rf, 6)},
-            {"model": "Support Vector Regression (SVR)", "rss": round(rss_svr, 2), "rmse": round(rmse_svr, 4), "r2": round(r2_svr, 6)},
-            {"model": "Linear Regression", "rss": round(rss_linear, 2), "rmse": round(rmse_linear, 4), "r2": round(r2_linear, 6)}
-        ]
-        logger.info("Successfully pre-calculated performance table values.")
-    except Exception as e:
-        logger.error(f"Error calculating model performances: {str(e)}")
+analytics_summary = None
+historical_records_cache = []
 
 def init_ml_pipeline():
-    global model, model_linear, model_poly, poly_features, model_ridge, model_rf, model_svr, scaler, df_historical
+    global bundle_data, scaler_mean, scaler_scale, linear_coef, linear_intercept
+    global poly_coef, poly_intercept, poly_powers, ridge_coef, ridge_intercept
+    global svr_sv, svr_dual_coef, svr_intercept, svr_gamma, rf_trees
+    global performances_cache, analytics_summary, historical_records_cache
+
     try:
-        # Load all models
-        if not os.path.exists(MODEL_LINEAR_PATH): raise FileNotFoundError(f"Linear model not found at {MODEL_LINEAR_PATH}")
-        if not os.path.exists(MODEL_POLY_PATH): raise FileNotFoundError(f"Polynomial model not found at {MODEL_POLY_PATH}")
-        if not os.path.exists(POLY_FEATURES_PATH): raise FileNotFoundError(f"Poly features not found at {POLY_FEATURES_PATH}")
-        if not os.path.exists(MODEL_RIDGE_PATH): raise FileNotFoundError(f"Ridge model not found at {MODEL_RIDGE_PATH}")
-        if not os.path.exists(MODEL_RF_PATH): raise FileNotFoundError(f"Random Forest model not found at {MODEL_RF_PATH}")
-        if not os.path.exists(MODEL_SVR_PATH): raise FileNotFoundError(f"SVR model not found at {MODEL_SVR_PATH}")
+        if not os.path.exists(BUNDLE_PATH):
+            raise FileNotFoundError(f"Models bundle not found at {BUNDLE_PATH}")
 
-        model_linear = joblib.load(MODEL_LINEAR_PATH)
-        model = model_linear  # backward compatibility alias
-        model_poly = joblib.load(MODEL_POLY_PATH)
-        poly_features = joblib.load(POLY_FEATURES_PATH)
-        model_ridge = joblib.load(MODEL_RIDGE_PATH)
-        model_rf = joblib.load(MODEL_RF_PATH)
-        model_svr = joblib.load(MODEL_SVR_PATH)
+        with open(BUNDLE_PATH, "r") as f:
+            bundle_data = json.load(f)
 
-        logger.info("All regression models loaded successfully.")
+        # Extract Scaler
+        scaler_mean = np.array(bundle_data["scaler"]["mean"], dtype=np.float64)
+        scaler_scale = np.array(bundle_data["scaler"]["scale"], dtype=np.float64)
 
-        # Load dataset CSV
-        if not os.path.exists(CSV_PATH):
-            raise FileNotFoundError(f"Dataset CSV file not found at {CSV_PATH}")
-        
-        df = pd.read_csv(CSV_PATH)
-        df = df.iloc[2:].reset_index(drop=True)
-        df.rename(columns={'Price': 'Date'}, inplace=True)
-        df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].astype(float)
-        df['Volume'] = df['Volume'].astype(int)
+        # Extract Linear
+        linear_coef = np.array(bundle_data["linear"]["coef"], dtype=np.float64)
+        linear_intercept = float(bundle_data["linear"]["intercept"])
 
-        # Volume outlier filtering matching training notebook
-        Q1 = df['Volume'].quantile(0.25)
-        Q3 = df['Volume'].quantile(0.75)
-        IQR = Q3 - Q1
-        lower = Q1 - 1.5 * IQR
-        upper = Q3 + 1.5 * IQR
-        df = df[(df['Volume'] >= lower) & (df['Volume'] <= upper)]
+        # Extract Poly
+        poly_coef = np.array(bundle_data["poly"]["coef"], dtype=np.float64)
+        poly_intercept = float(bundle_data["poly"]["intercept"])
+        poly_powers = np.array(bundle_data["poly"]["powers"], dtype=np.int32)
 
-        # Prepare target
-        df['Tomorrow_close'] = df['Close'].shift(-1)
-        df.dropna(inplace=True)
+        # Extract Ridge
+        ridge_coef = np.array(bundle_data["ridge"]["coef"], dtype=np.float64)
+        ridge_intercept = float(bundle_data["ridge"]["intercept"])
 
-        # Store historical reference for analytics
-        df_historical = df.copy()
+        # Extract SVR
+        svr_sv = np.array(bundle_data["svr"]["support_vectors"], dtype=np.float64)
+        svr_dual_coef = np.array(bundle_data["svr"]["dual_coef"], dtype=np.float64)
+        svr_intercept = float(bundle_data["svr"]["intercept"])
+        svr_gamma = float(bundle_data["svr"]["gamma"])
 
-        # Fit scaler using exact features and random split state (6244)
-        X = df[['Close', 'High', 'Low', 'Open', 'Volume']]
-        y = df['Tomorrow_close']
-        
-        x_train, x_test, y_train, y_test = train_test_split(X, y, train_size=0.8, random_state=6244)
-        scaler = StandardScaler()
-        scaler.fit(x_train)
-        logger.info("Successfully initialized scaler using training split features (seed 6244).")
+        # Extract RF
+        rf_trees = bundle_data["rf"]["trees"]
 
-        # Dynamically calculate the metric cache
-        calculate_performances(x_test, y_test)
+        # Extract metrics & analytics
+        performances_cache = bundle_data["performances"]
+        analytics_summary = bundle_data["analytics_summary"]
+        historical_records_cache = bundle_data["historical_data"]
 
+        logger.info("Pure-NumPy ML pipeline and metrics loaded successfully from models_bundle.json.")
     except Exception as e:
-        logger.critical(f"Failed to initialize ML pipeline: {str(e)}")
+        logger.critical(f"Failed to initialize ML pipeline bundle: {str(e)}")
         raise e
 
-# Ensure ML pipeline is initialized
 def ensure_pipeline_initialized():
-    if model_linear is None or scaler is None:
+    if bundle_data is None:
         init_ml_pipeline()
 
-# Initialize pipeline on startup
 @app.on_event("startup")
 def startup_event():
     ensure_pipeline_initialized()
 
-# Auto-initialize on module load for Serverless environments
+# Auto-initialize on module import for serverless environments
 try:
     ensure_pipeline_initialized()
 except Exception as e:
-    logger.warning(f"Initial ML pipeline load deferred or failed: {e}")
+    logger.warning(f"Initial ML pipeline load deferred: {e}")
 
 @app.get("/")
 @app.get("/api")
@@ -185,9 +122,10 @@ def read_root():
 @app.get("/api/health", response_model=HealthResponse)
 def health():
     ensure_pipeline_initialized()
+    is_healthy = bundle_data is not None and scaler_mean is not None
     return {
-        "status": "healthy" if model_linear is not None and scaler is not None else "degraded",
-        "model_loaded": model_linear is not None
+        "status": "healthy" if is_healthy else "degraded",
+        "model_loaded": is_healthy
     }
 
 @app.get("/performance", response_model=PerformanceResponse)
@@ -199,52 +137,71 @@ def performance():
     return {"performances": performances_cache}
 
 def preprocess_and_predict(payload: PredictRequest) -> float:
-    # 1. Standard Input Validations: Low <= High, and Open between Low and High
+    # 1. Standard Input Validations
     if payload.low > payload.high:
         raise HTTPException(status_code=400, detail="Low price cannot be greater than High price")
     if payload.open < payload.low or payload.open > payload.high:
         raise HTTPException(status_code=400, detail="Open price must be between Low and High price")
-        
-    # 2. DataFrame Construction with explicit column ordering to avoid mismatches
-    features = ['Close', 'High', 'Low', 'Open', 'Volume']
-    input_df = pd.DataFrame([[
+
+    # Feature vector order: ['Close', 'High', 'Low', 'Open', 'Volume']
+    raw_input = np.array([
         payload.close,
         payload.high,
         payload.low,
         payload.open,
         payload.volume
-    ]], columns=features)
-    
-    # 3. Scale input parameters
-    scaled_features = scaler.transform(input_df)
-    
-    # 4. Predict using the selected regression engine
+    ], dtype=np.float64)
+
+    # Scale feature vector
+    x_scaled = (raw_input - scaler_mean) / scaler_scale
+
     model_name = payload.model_name.lower().strip()
+
     if "polynomial" in model_name:
-        poly_scaled = poly_features.transform(scaled_features)
-        prediction = float(model_poly.predict(poly_scaled)[0])
+        # Polynomial feature expansion
+        poly_terms = np.array([np.prod(x_scaled ** p) for p in poly_powers], dtype=np.float64)
+        prediction = float(np.dot(poly_coef, poly_terms) + poly_intercept)
+
     elif "ridge" in model_name:
-        prediction = float(model_ridge.predict(scaled_features)[0])
+        prediction = float(np.dot(ridge_coef, x_scaled) + ridge_intercept)
+
     elif "random forest" in model_name:
-        prediction = float(model_rf.predict(scaled_features)[0])
+        tree_preds = []
+        for tree in rf_trees:
+            left = tree["children_left"]
+            right = tree["children_right"]
+            feat = tree["feature"]
+            thresh = tree["threshold"]
+            val = tree["value"]
+            node = 0
+            while left[node] != right[node]:
+                if x_scaled[feat[node]] <= thresh[node]:
+                    node = left[node]
+                else:
+                    node = right[node]
+            tree_preds.append(val[node])
+        prediction = float(np.mean(tree_preds))
+
     elif "svr" in model_name or "support vector" in model_name:
-        prediction = float(model_svr.predict(scaled_features)[0])
-    else:  # Default/Linear Regression
-        prediction = float(model_linear.predict(scaled_features)[0])
-        
+        dists = np.sum((svr_sv - x_scaled) ** 2, axis=1)
+        k = np.exp(-svr_gamma * dists)
+        prediction = float(np.dot(svr_dual_coef, k) + svr_intercept)
+
+    else:  # Default / Linear Regression
+        prediction = float(np.dot(linear_coef, x_scaled) + linear_intercept)
+
     return prediction
 
 @app.post("/predict", response_model=PredictResponse)
 @app.post("/api/predict", response_model=PredictResponse)
 def predict(payload: PredictRequest):
     ensure_pipeline_initialized()
-    if model_linear is None or scaler is None:
+    if bundle_data is None:
         raise HTTPException(status_code=503, detail="Prediction model is not initialized/loaded")
-    
+
     try:
         predicted_close_price = preprocess_and_predict(payload)
-        
-        # Calculate changes compared to input closing price
+
         change = predicted_close_price - payload.close
         change_percent = (change / payload.close) * 100.0
 
@@ -265,44 +222,22 @@ def predict(payload: PredictRequest):
 @app.get("/api/analytics", response_model=AnalyticsResponse)
 def get_analytics(limit: int = 300):
     ensure_pipeline_initialized()
-    if df_historical is None:
+    if not historical_records_cache or analytics_summary is None:
         raise HTTPException(status_code=503, detail="Historical dataset is not loaded")
-    
-    try:
-        # Compute summary stats
-        latest_row = df_historical.iloc[-1]
-        latest_close = float(latest_row['Close'])
-        highest_close = float(df_historical['Close'].max())
-        lowest_close = float(df_historical['Close'].min())
-        average_volume = float(df_historical['Volume'].mean())
-        total_records = len(df_historical)
 
-        # Slice last N records for charting
-        chart_df = df_historical.tail(limit)
-        
-        historical_records = []
-        for _, row in chart_df.iterrows():
-            historical_records.append(
-                HistoricalRecord(
-                    date=row['Date'] if isinstance(row['Date'], str) else row['Date'].strftime('%d-%m-%Y') if hasattr(row['Date'], 'strftime') else str(row['Date']),
-                    open=float(row['Open']),
-                    high=float(row['High']),
-                    low=float(row['Low']),
-                    close=float(row['Close']),
-                    volume=int(row['Volume'])
-                )
-            )
+    try:
+        sliced_history = historical_records_cache[-limit:] if limit > 0 else historical_records_cache
+        records = [HistoricalRecord(**r) for r in sliced_history]
 
         return {
-            "latest_close": round(latest_close, 2),
-            "highest_close": round(highest_close, 2),
-            "lowest_close": round(lowest_close, 2),
-            "average_volume": round(average_volume, 2),
-            "total_records": total_records,
-            "historical_data": historical_records
+            "latest_close": analytics_summary["latest_close"],
+            "highest_close": analytics_summary["highest_close"],
+            "lowest_close": analytics_summary["lowest_close"],
+            "average_volume": analytics_summary["average_volume"],
+            "total_records": analytics_summary["total_records"],
+            "historical_data": records
         }
 
     except Exception as e:
         logger.error(f"Analytics retrieval error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch analytics data: {str(e)}")
-
