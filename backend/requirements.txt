@@ -1,8 +1,6 @@
 fastapi
-uvicorn
+pydantic
 pandas
 numpy
 scikit-learn
 joblib
-pydantic
-python-dotenv
