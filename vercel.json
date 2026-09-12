@@ -4,10 +4,11 @@
   "outputDirectory": "frontend/dist",
   "functions": {
     "api/index.py": {
-      "excludeFiles": "frontend/**"
+      "includeFiles": "backend/**"
     }
   },
   "rewrites": [
+    { "source": "/api", "destination": "/api/index.py" },
     { "source": "/api/(.*)", "destination": "/api/index.py" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
